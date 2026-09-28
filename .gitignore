@@ -231,3 +231,6 @@ __pycache__/
 
 # Generated dataset artifacts
 outcome/
+
+# Visual Studio Code local configuration and caches
+.vscode/
