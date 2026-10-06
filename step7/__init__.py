@@ -9,3 +9,5 @@ __all__ = [
     "Step7SampleLoader",
     "collate_alpasim_samples",
 ]
+
+from .occstudio_bridge import to_occstudio_batch

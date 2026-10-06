@@ -113,6 +113,7 @@ class Step7SampleLoader:
             "sample_id": sample_id, "clip_id": clip_id,
             "camera_order": CAMERA_ORDER,
             "raw_images_uint8": np.stack([current_raw, history_raw]),
+            "raw_images_uint8": np.stack([current_raw, history_raw]),
             "images_uint8": np.stack([current, history]),
             "image_valid_masks": np.stack([current_valid, history_valid]),
             "imgs": torch.from_numpy(np.stack([current, history])).permute(0, 1, 4, 2, 3).float() / 255.0,
