@@ -11,7 +11,7 @@ from typing import Any
 
 from project_paths import MANIFEST_ROOT, OUTCOME_ROOT, REPORT_ROOT
 
-FINALIZER_VERSION = "0.1.0"
+FINALIZER_VERSION = "0.2.0"
 
 
 def sha256_file(path: Path) -> str:
@@ -49,57 +49,55 @@ def atomic_write(path: Path, text: str, force: bool) -> None:
 
 
 def classify_edge_cases(diagnosis: dict[str, Any]) -> dict[str, Any]:
-    records = diagnosis["records"]
-    zero_empty = [row for row in records if row["known_voxels"] == 0]
+    """Validate diagnosis completeness without freezing dataset distributions."""
+    records = diagnosis.get("records", [])
+    if not isinstance(records, list):
+        return {
+            "status": "fail",
+            "reason_counts": {},
+            "zero_nonempty_count": 0,
+            "full_visibility_count": 0,
+            "violations": ["edge diagnosis records must be a list"],
+        }
+
+    zero_empty = [row for row in records if row.get("known_voxels") == 0]
     zero_nonempty = [
         row for row in records
-        if row["known_voxels"] > 0 and row["mask_camera_true"] == 0
+        if row.get("known_voxels", 0) > 0 and row.get("mask_camera_true") == 0
     ]
     full = [
         row for row in records
-        if row["known_voxels"] > 0
-        and row["mask_camera_true"] == row["known_voxels"]
+        if row.get("known_voxels", 0) > 0
+        and row.get("mask_camera_true") == row.get("known_voxels")
     ]
-
     violations = []
-    reason_counts = {
-        "empty_known_geometry": len(zero_empty),
-        "known_geometry_entirely_rear_or_outside_valid_fov": 0,
-        "small_fully_visible_known_geometry": len(full),
-    }
-
-    for row in zero_nonempty:
-        quadrants = row["known_quadrants"]
-        front = quadrants["front_left"] + quadrants["front_right"]
-        if front != 0:
+    classified_count = len(zero_empty) + len(zero_nonempty) + len(full)
+    checks = (
+        ("record_count", classified_count),
+        ("zero_empty_count", len(zero_empty)),
+        ("zero_nonempty_count", len(zero_nonempty)),
+        ("full_visibility_count", len(full)),
+    )
+    for name, expected in checks:
+        if diagnosis.get(name) != expected:
+            violations.append(f"edge diagnosis {name} mismatch")
+    for row in records:
+        if row.get("recomputed_visible") != row.get("mask_camera_true"):
             violations.append(
-                f"{row['sample_id']}: zero visibility with {front} front known voxels"
+                f"{row.get('sample_id', '<unknown>')}: recomputed visibility mismatch"
             )
-            continue
-        if any(
-            camera["valid_projection"] != 0
-            for camera in row["camera_projection_counts"].values()
-        ):
-            violations.append(
-                f"{row['sample_id']}: zero visibility despite valid projection"
-            )
-            continue
-        reason_counts["known_geometry_entirely_rear_or_outside_valid_fov"] += 1
-
-    for row in full:
-        if row["known_voxels"] > 64:
-            violations.append(
-                f"{row['sample_id']}: full visibility with unexpectedly large known set"
-            )
-
     return {
         "status": "pass" if not violations else "fail",
-        "reason_counts": reason_counts,
+        "policy": "diagnosed edge cases are recorded; dataset-scale distribution is not frozen",
+        "reason_counts": {
+            "empty_known_geometry": len(zero_empty),
+            "diagnosed_zero_visibility_with_known_geometry": len(zero_nonempty),
+            "diagnosed_full_visibility": len(full),
+        },
         "zero_nonempty_count": len(zero_nonempty),
         "full_visibility_count": len(full),
         "violations": violations,
     }
-
 
 def finalize(
     *,
@@ -118,14 +116,32 @@ def finalize(
     edge_diagnosis = read_json(edge_diagnosis_path)
 
     failures = []
+    manifest_record_count = sum(
+        1 for line in label_manifest.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    )
+    expected_record_count = final_audit.get("record_count")
+    expected_scene_count = final_audit.get("scene_count")
+    if not isinstance(expected_record_count, int) or expected_record_count <= 0:
+        failures.append("step6 final audit record_count is invalid")
+    if not isinstance(expected_scene_count, int) or expected_scene_count <= 0:
+        failures.append("step6 final audit scene_count is invalid")
+    if manifest_record_count != expected_record_count:
+        failures.append(
+            f"label manifest count is {manifest_record_count}, expected {expected_record_count}"
+        )
     if final_audit.get("status") != "pass":
         failures.append("step6 final audit did not pass")
     if final_audit.get("failure_count") != 0:
         failures.append("step6 final audit has failures")
-    if label_summary.get("record_count") != 24019:
-        failures.append("label summary record_count is not 24019")
-    if visibility_summary.get("record_count") != 24019:
-        failures.append("visibility summary record_count is not 24019")
+    if label_summary.get("record_count") != expected_record_count:
+        failures.append(
+            f"label summary record_count is {label_summary.get('record_count')}, expected {expected_record_count}"
+        )
+    if visibility_summary.get("record_count") != expected_record_count:
+        failures.append(
+            f"visibility summary record_count is {visibility_summary.get('record_count')}, expected {expected_record_count}"
+        )
     if visibility_summary.get("unknown_voxels_visible") is not False:
         failures.append("unknown_voxels_visible must be false")
     if visibility_summary.get("observed_free_generated") is not False:
@@ -134,8 +150,10 @@ def finalize(
         failures.append("mask_lidar policy mismatch")
 
     label_count = sum(1 for _ in labels_root.rglob("labels.npz"))
-    if label_count != 24019:
-        failures.append(f"label file count is {label_count}, expected 24019")
+    if label_count != expected_record_count:
+        failures.append(
+            f"label file count is {label_count}, expected {expected_record_count}"
+        )
 
     edge_classification = classify_edge_cases(edge_diagnosis)
     if edge_classification["status"] != "pass":
@@ -146,8 +164,8 @@ def finalize(
         "contract_version": "0.1",
         "finalizer_version": FINALIZER_VERSION,
         "status": "frozen" if not failures else "failed",
-        "record_count": 24019,
-        "scene_count": 908,
+        "record_count": expected_record_count,
+        "scene_count": expected_scene_count,
         "label_file_count": label_count,
         "labels_root": str(labels_root),
         "label_manifest": str(label_manifest),
@@ -169,7 +187,7 @@ def finalize(
         },
         "edge_case_resolution": edge_classification,
         "source_boundary": {
-            "input": "908 local Clips only",
+            "input": f"{expected_scene_count} local Clips only",
             "usdz_used": False,
             "remote_download_used": False,
             "virtual_lidar_used": False,

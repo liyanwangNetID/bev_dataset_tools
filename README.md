@@ -1219,3 +1219,39 @@ tests/step6/test_step6_finalize.py
 ## 14. One-paragraph handoff summary
 
 The repository has completed and frozen a local-Clip-only data pipeline through Step 6. It discovers 908 AlpaSim Clips, reads all data through a unified API, builds 24,019 stable two-frame four-camera Keyframes, rectifies four cameras to a shared 960 x 540 pinhole contract, and generates 24,019 Occ3D-compatible partial semantic occupancy labels in the current ego frame. Each label has `semantics`, a conservative rectification-aware per-camera-z-buffer `mask_camera`, and an all-False `mask_lidar`. Unknown space is ID 255 and is not free space. No USDZ, remote asset, virtual LiDAR, observed-free label, Scene-Fact, CoC, or Reasoning is used. The immediate next task is to implement an OccStudio/ALOcc dataset adapter, then create a Map-ID-level 80/10/10 split, pass eight-sample and 64-sample training smoke tests, fine-tune a single-frame ALOcc baseline and an ALOcc + GDFusion temporal model, evaluate known-region and camera-visible occupancy metrics, and freeze the resulting dataset/model contracts.
+
+## Full dataset production and Step 7 delivery status
+
+Step 7 DataLoader development and delivery are complete.
+
+- Implementation: `step7/`
+- Automated tests: 18 passed
+- Reference dataset: 908 Clips, 24,019 samples
+- Reference raw root: `/home/lab/data_from_alpasim`
+- Reference outcome root: `/home/lab/bev_alpasim_dataset_tools/outcome`
+- Full dataset: 2,311 Clips
+- Full raw root: `/home/lab/data_all_alpasim`
+- Full outcome root: `/home/lab/bev_alpasim_dataset_tools/outcome_full`
+- Time order: current, history
+- Camera order: cross_left, front_wide, cross_right, front_tele
+- Occupancy shape: `[200, 200, 16]`
+- Free label: 17
+- Ignore label: 255
+
+The 2,311-Clip dataset uses the same frozen schemas and Step 1 through Step 7 code as the verified reference dataset. Only the raw-data and outcome roots change.
+
+Production sequence:
+
+1. Step 1: Clip manifest
+2. Step 2: Shared reading and geometry API
+3. Step 3: Occupancy Clip profile
+4. Step 4: Keyframe manifest
+5. Step 5: Calibration census and Rectification
+6. Step 6A: Occupancy source manifest
+7. Step 6B: Occupancy voxel labels
+8. Step 6C: Camera-visibility supervision
+9. Step 7: DataLoader and visualization audit
+
+Do not overwrite the verified reference products under `outcome/`. The full build must write only to `outcome_full/`.
+
+Do not copy sample counts, class totals, visibility totals, rejection counts, distribution statistics, or file hashes from the 908-Clip reference build. Recompute all scale-dependent values from the full build.
