@@ -11,7 +11,7 @@ from typing import Any
 
 from project_paths import MANIFEST_ROOT, OUTCOME_ROOT, REPORT_ROOT
 
-FINALIZER_VERSION = "0.2.0"
+FINALIZER_VERSION = "0.3.0"
 
 
 def sha256_file(path: Path) -> str:
@@ -144,8 +144,12 @@ def finalize(
         )
     if visibility_summary.get("unknown_voxels_visible") is not False:
         failures.append("unknown_voxels_visible must be false")
-    if visibility_summary.get("observed_free_generated") is not False:
-        failures.append("observed_free_generated must be false")
+    if visibility_summary.get("observed_free_generated") is not True:
+        failures.append("observed_free_generated must be true")
+    if int(final_audit.get("semantic_class_voxel_counts", {}).get("17", 0)) <= 0:
+        failures.append("observed-free semantic ID 17 is absent")
+    if int(final_audit.get("visible_class_voxel_counts", {}).get("17", 0)) <= 0:
+        failures.append("camera-visible observed-free semantic ID 17 is absent")
     if visibility_summary.get("mask_lidar_policy") != "all_false_no_lidar":
         failures.append("mask_lidar policy mismatch")
 
@@ -196,10 +200,10 @@ def finalize(
             "semantic_ids": "Occ3D 0-17 plus 255",
             "recorded_actor_without_direct_occ3d_type": "others=0",
             "unverifiable_space": "unknown=255",
-            "observed_free_17_generated": False,
+            "observed_free_17_generated": True,
             "driveable_surface_source": "VectorMap lane ribbons",
             "actor_source": "current Actor oriented 3D boxes",
-            "mask_camera": "known semantic voxel centers, rectified valid mask, per-camera z-buffer",
+            "mask_camera": "valid rectified frustum creates 17; supervision only through first known surface",
             "mask_lidar": "all false",
         },
         "failures": failures,

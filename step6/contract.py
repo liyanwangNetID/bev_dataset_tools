@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 
-GENERATOR_VERSION = "0.1.1"
+GENERATOR_VERSION = "0.2.0"
 UNKNOWN_ID = 255
 OBSERVED_FREE_ID = 17
 OCC3D_CLASSES = {
@@ -37,6 +37,6 @@ def contract_dict() -> dict:
       "occ3d_classes":{str(k):v for k,v in OCC3D_CLASSES.items()},
       "actor_class_to_occ3d":dict(ACTOR_CLASS_TO_OCC3D),
       "map_geometry":{"lane_ribbon":11},
-      "unverifiable_space":255,"observed_free_requires_verified_ray":True,
+      "unverifiable_space":255,"observed_free_requires_verified_ray":True,"traversability_policy":{"17":"traversable","0-16":"non_traversable","255":"non_traversable_unknown"},
       "source_policy":{"allowed":["local_clip_actor_current","local_clip_vector_map","frozen_keyframe_manifest","frozen_ego_pose"],"forbidden":["usdz","mesh","remote_download","online_simulator_service"]},
     }

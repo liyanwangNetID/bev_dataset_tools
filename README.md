@@ -1255,3 +1255,360 @@ Production sequence:
 Do not overwrite the verified reference products under `outcome/`. The full build must write only to `outcome_full/`.
 
 Do not copy sample counts, class totals, visibility totals, rejection counts, distribution statistics, or file hashes from the 908-Clip reference build. Recompute all scale-dependent values from the full build.
+
+<!-- CURRENT-FREEZE-START -->
+## Current frozen handoff and reproducible command book
+
+### Freeze identity
+
+- Freeze date: 2026-10-08
+- Git repository root: `/home/lab/bev_alpasim_dataset_tools/bev_dataset_tools`
+- Project execution root: `/home/lab/bev_alpasim_dataset_tools`
+- Reference raw root: `/home/lab/data_from_alpasim`
+- Reference outcome root: `/home/lab/bev_alpasim_dataset_tools/outcome`
+- Reference scale: 908 Clips and 24,019 samples
+- Full raw root: `/home/lab/data_all_alpasim`
+- Full outcome root: `/home/lab/bev_alpasim_dataset_tools/outcome_full`
+- Full scale: 2,311 Clips and 72,250 samples
+- Production mode: camera-only; no virtual LiDAR
+- Camera order: `cross_left`, `front_wide`, `cross_right`, `front_tele`
+- Time order: `current`, `history`
+- Grid: `[200, 200, 16]`, axis order `[x, y, z]`, voxel size `0.4 m`
+- Extent: `x,y in [-40,40) m`, `z in [-1.0,5.4) m`
+
+### Current semantic and traversability contract
+
+- IDs `0-16`: occupied semantic classes, except that ID 11 specifically represents the physical `driveable_surface` layer.
+- ID `17`: `observed_free_space`. It means free 3D space, not road and not automatically vehicle-drivable ground.
+- ID `255`: unknown or unverifiable space. It is ignored by training loss and must never be converted to free by consumers.
+- Vehicle-drivable ground is represented by ID `11`, not ID `17`.
+- `mask_camera` is a conservative supervision mask. It is true only on rays for which a known first surface exists, up to that first known surface.
+- `mask_lidar` is all False.
+- Class 17 is generated from valid rectified camera frusta without overwriting IDs 0-16.
+- For each XY column containing ID 11, class 17 strictly below the lowest ID 11 voxel is filtered back to ID 255 and its `mask_camera` bit is cleared.
+
+### Current static-geometry boundary
+
+The raw Clip VectorMap currently exposes only `lanes`, `road_edges`, `traffic_signs`, and `wait_lines`. Actor labels contain traffic participants and related movable objects. No building, wall, tree, vegetation, terrain mesh, semantic depth, or complete static-world geometry is currently present in the inspected raw Clip contract.
+
+Consequences:
+
+- Lane ribbons are voxelized as ID 11.
+- Dynamic Actor boxes are voxelized into their mapped semantic classes.
+- Buildings and vegetation are not currently voxelized.
+- `road_edges` are 3D polylines without sufficient width, height, or semantic type to invent solid barriers.
+- `traffic_signs` provide position and sign type but not sufficient dimensions for reliable volumetric occupancy.
+- Do not fabricate ID 15 `manmade` or ID 16 `vegetation` from RGB alone.
+- Before a future static-obstacle upgrade, inspect the AlpaSim export source or add complete world geometry, depth plus semantics, or explicit static annotations.
+
+### Current reference-dataset validation state
+
+The small reference dataset has completed the following checks after observed-free generation:
+
+- 24,019 label files checked; no missing or invalid files.
+- Every sample contains ID 17 before the below-road cleanup.
+- Step 6 visibility audit passed with zero failures.
+- Step 6 edge diagnosis passed.
+- Step 6 contract was frozen.
+- Step 7 test suite passed: 18 tests.
+- Step 7 delivery audit passed for `test_clip_001_9300112661000`.
+- DataLoader tensors contain occupied IDs, ID 17, ID 255, `mask_camera`, and all-False `mask_lidar`.
+
+After any label mutation, including the below-road filter, previous audit reports and contract hashes are stale until the audit, diagnosis, finalize, and Step 7 validation commands below are rerun.
+
+### Environment setup
+
+Reference dataset:
+
+```bash
+cd /home/lab/bev_alpasim_dataset_tools || exit 1
+export BEV_ALPASIM_DATA_ROOT=/home/lab/data_from_alpasim
+export ALPASIM_RAW_DATA_ROOT=/home/lab/data_from_alpasim
+export BEV_DATASET_PROJECT_ROOT=/home/lab/bev_alpasim_dataset_tools
+export BEV_DATASET_OUTCOME_ROOT=/home/lab/bev_alpasim_dataset_tools/outcome
+export PYTHONPATH=/home/lab/bev_alpasim_dataset_tools/bev_dataset_tools:/home/lab/bev_alpasim_dataset_tools${PYTHONPATH:+:$PYTHONPATH}
+```
+
+Full dataset:
+
+```bash
+cd /home/lab/bev_alpasim_dataset_tools || exit 1
+export BEV_ALPASIM_DATA_ROOT=/home/lab/data_all_alpasim
+export ALPASIM_RAW_DATA_ROOT=/home/lab/data_all_alpasim
+export BEV_DATASET_PROJECT_ROOT=/home/lab/bev_alpasim_dataset_tools
+export BEV_DATASET_OUTCOME_ROOT=/home/lab/bev_alpasim_dataset_tools/outcome_full
+export PYTHONPATH=/home/lab/bev_alpasim_dataset_tools/bev_dataset_tools:/home/lab/bev_alpasim_dataset_tools${PYTHONPATH:+:$PYTHONPATH}
+```
+
+The path helper reads `BEV_ALPASIM_DATA_ROOT`, not `ALPASIM_RAW_DATA_ROOT`. Both are exported because some Step 7 compatibility code may still read the older name.
+
+### Complete production command sequence
+
+Run from `/home/lab/bev_alpasim_dataset_tools`. Set the environment first to either the reference or full profile above. The commands below use path-helper defaults unless explicit paths are required.
+
+#### Step 1: Clip manifest
+
+```bash
+python3 -m bev_dataset_tools.step1.clip_manifest --force
+```
+
+#### Step 2: Unified reader and geometry API
+
+Step 2 is a shared API and has no independent formal production command. Validate it through the complete test suite.
+
+#### Step 3: Occupancy Clip profile
+
+```bash
+python3 -m bev_dataset_tools.step3.profile \
+  --dataset-root "$BEV_ALPASIM_DATA_ROOT" \
+  --profile-output "$BEV_DATASET_OUTCOME_ROOT/manifests/occupancy_clip_profile_v0.1.jsonl" \
+  --summary-output "$BEV_DATASET_OUTCOME_ROOT/reports/occupancy_feasibility_v0.1.json" \
+  --force
+```
+
+#### Step 4: Formal Keyframes
+
+```bash
+python3 -m bev_dataset_tools.step4.keyframes \
+  --dataset-root "$BEV_ALPASIM_DATA_ROOT" \
+  --step1-manifest "$BEV_DATASET_OUTCOME_ROOT/manifests/clips_v0.1.jsonl" \
+  --step3-profile "$BEV_DATASET_OUTCOME_ROOT/manifests/occupancy_clip_profile_v0.1.jsonl" \
+  --output "$BEV_DATASET_OUTCOME_ROOT/manifests/occupancy_keyframes_v0.1.jsonl" \
+  --summary-output "$BEV_DATASET_OUTCOME_ROOT/reports/occupancy_keyframe_summary_v0.1.json" \
+  --rejections-output "$BEV_DATASET_OUTCOME_ROOT/reports/occupancy_temporal_rejections_v0.1.jsonl" \
+  --force
+```
+
+#### Step 5A: Calibration census and shared rectification assets
+
+```bash
+python3 -m bev_dataset_tools.step5.census --force
+```
+
+#### Step 5B: Rectification trial
+
+```bash
+python3 -m bev_dataset_tools.step5.trial --force
+```
+
+#### Step 5C: Rectification assignments and contract
+
+```bash
+python3 -m bev_dataset_tools.step5.finalize --force
+```
+
+#### Step 6A: Compact occupancy source manifest
+
+```bash
+python3 -m bev_dataset_tools.step6.build_sources \
+  --keyframe-manifest "$BEV_DATASET_OUTCOME_ROOT/manifests/occupancy_keyframes_v0.1.jsonl" \
+  --dataset-root "$BEV_ALPASIM_DATA_ROOT" \
+  --output "$BEV_DATASET_OUTCOME_ROOT/manifests/occupancy_sources_v0.1.jsonl" \
+  --summary-output "$BEV_DATASET_OUTCOME_ROOT/reports/occupancy_source_summary_v0.1.json" \
+  --contract-output "$BEV_DATASET_OUTCOME_ROOT/reports/occupancy_source_contract_v0.1.json" \
+  --force
+```
+
+#### Step 6B: Occupied semantic voxelization
+
+```bash
+python3 -m bev_dataset_tools.step6.voxelize \
+  --source-manifest "$BEV_DATASET_OUTCOME_ROOT/manifests/occupancy_sources_v0.1.jsonl" \
+  --keyframe-manifest "$BEV_DATASET_OUTCOME_ROOT/manifests/occupancy_keyframes_v0.1.jsonl" \
+  --dataset-root "$BEV_ALPASIM_DATA_ROOT" \
+  --output-root "$BEV_DATASET_OUTCOME_ROOT/occupancy/labels_v0.1" \
+  --manifest-output "$BEV_DATASET_OUTCOME_ROOT/manifests/occupancy_labels_v0.1.jsonl" \
+  --summary-output "$BEV_DATASET_OUTCOME_ROOT/reports/occupancy_label_summary_v0.1.json" \
+  --force
+```
+
+#### Step 6C: Observed-free generation and conservative camera mask
+
+```bash
+python3 -m bev_dataset_tools.step6.apply_camera_visibility \
+  --label-manifest "$BEV_DATASET_OUTCOME_ROOT/manifests/occupancy_labels_v0.1.jsonl" \
+  --outcome-root "$BEV_DATASET_OUTCOME_ROOT" \
+  --dataset-root "$BEV_ALPASIM_DATA_ROOT" \
+  --assignments "$BEV_DATASET_OUTCOME_ROOT/manifests/rectification_assignments_v0.1.jsonl" \
+  --rectification-root "$BEV_DATASET_OUTCOME_ROOT/calibration/rectification_v0.1" \
+  --summary-output "$BEV_DATASET_OUTCOME_ROOT/reports/occupancy_camera_visibility_summary_v0.1.json" \
+  --audit-output "$BEV_DATASET_OUTCOME_ROOT/reports/occupancy_camera_visibility_audit_v0.1.jsonl" \
+  --force
+```
+
+This production command now invokes the below-driveable filter internally. For labels generated before that integration, run the standalone migration once:
+
+```bash
+python3 -m bev_dataset_tools.step6.filter_below_driveable \
+  --label-manifest "$BEV_DATASET_OUTCOME_ROOT/manifests/occupancy_labels_v0.1.jsonl" \
+  --outcome-root "$BEV_DATASET_OUTCOME_ROOT" \
+  --report-output "$BEV_DATASET_OUTCOME_ROOT/reports/observed_free_below_driveable_filter_v0.1.json" \
+  --progress-every 500 \
+  --force
+```
+
+Do not run the standalone migration after a fresh Step 6C unless auditing idempotency; a second run should clear zero additional voxels.
+
+#### Step 6D: Visibility and semantic audit
+
+```bash
+python3 -m bev_dataset_tools.step6.audit_visibility \
+  --label-manifest "$BEV_DATASET_OUTCOME_ROOT/manifests/occupancy_labels_v0.1.jsonl" \
+  --outcome-root "$BEV_DATASET_OUTCOME_ROOT" \
+  --visibility-summary "$BEV_DATASET_OUTCOME_ROOT/reports/occupancy_camera_visibility_summary_v0.1.json" \
+  --visibility-audit "$BEV_DATASET_OUTCOME_ROOT/reports/occupancy_camera_visibility_audit_v0.1.jsonl" \
+  --summary-output "$BEV_DATASET_OUTCOME_ROOT/reports/step6_final_audit_v0.1.json" \
+  --edge-cases-output "$BEV_DATASET_OUTCOME_ROOT/reports/step6_visibility_edge_cases_v0.1.jsonl" \
+  --force
+```
+
+#### Step 6E: Edge diagnosis
+
+```bash
+python3 -m bev_dataset_tools.step6.diagnose_visibility_edges \
+  --edge-cases "$BEV_DATASET_OUTCOME_ROOT/reports/step6_visibility_edge_cases_v0.1.jsonl" \
+  --outcome-root "$BEV_DATASET_OUTCOME_ROOT" \
+  --dataset-root "$BEV_ALPASIM_DATA_ROOT" \
+  --assignments "$BEV_DATASET_OUTCOME_ROOT/manifests/rectification_assignments_v0.1.jsonl" \
+  --rectification-root "$BEV_DATASET_OUTCOME_ROOT/calibration/rectification_v0.1" \
+  --report-output "$BEV_DATASET_OUTCOME_ROOT/reports/step6_visibility_edge_diagnosis_v0.1.json" \
+  --visual-root "$BEV_DATASET_OUTCOME_ROOT/review/step6_visibility_edge_diagnosis_current" \
+  --force
+```
+
+#### Step 6F: Freeze dataset contract
+
+```bash
+python3 -m bev_dataset_tools.step6.finalize \
+  --label-manifest "$BEV_DATASET_OUTCOME_ROOT/manifests/occupancy_labels_v0.1.jsonl" \
+  --labels-root "$BEV_DATASET_OUTCOME_ROOT/occupancy/labels_v0.1" \
+  --label-summary "$BEV_DATASET_OUTCOME_ROOT/reports/occupancy_label_summary_v0.1.json" \
+  --visibility-summary "$BEV_DATASET_OUTCOME_ROOT/reports/occupancy_camera_visibility_summary_v0.1.json" \
+  --final-audit "$BEV_DATASET_OUTCOME_ROOT/reports/step6_final_audit_v0.1.json" \
+  --edge-diagnosis "$BEV_DATASET_OUTCOME_ROOT/reports/step6_visibility_edge_diagnosis_v0.1.json" \
+  --output "$BEV_DATASET_OUTCOME_ROOT/reports/step6_dataset_contract_v0.2.json" \
+  --force
+```
+
+#### Step 7A: Complete adapter tests
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest tests/step7 -q
+```
+
+#### Step 7B: Delivery audit
+
+List real sample IDs instead of reusing IDs from another raw dataset:
+
+```bash
+python3 -m bev_dataset_tools.step7.list_samples \
+  --scene-id test_clip_001 \
+  --limit 5
+```
+
+Then audit one returned sample ID:
+
+```bash
+python3 -m bev_dataset_tools.step7.audit_delivery \
+  --sample-id SAMPLE_ID_FROM_LIST \
+  --output /tmp/step7_delivery_audit.json
+```
+
+#### Step 7C: DataLoader and visualization audit
+
+```bash
+rm -rf /tmp/step7_review
+python3 -m bev_dataset_tools.step7.validate_dataloader_sample \
+  --sample-id SAMPLE_ID_FROM_LIST \
+  --output-dir /tmp/step7_review
+```
+
+### Tests
+
+Step 6 tests:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest tests/step6 -q
+```
+
+Step 7 tests:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest tests/step7 -q
+```
+
+Complete project suite from the Git repository root:
+
+```bash
+cd /home/lab/bev_alpasim_dataset_tools/bev_dataset_tools || exit 1
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest -q
+```
+
+### Observed-free audits and visualizations
+
+Full ID 17 audit tool, when available in `/home/lab/Downloads`:
+
+```bash
+python3 -u /home/lab/Downloads/audit_observed_free_space_v2.py \
+  --outcome-root "$BEV_DATASET_OUTCOME_ROOT" \
+  --output "$BEV_DATASET_OUTCOME_ROOT/reports/observed_free_space_audit_current.json" \
+  --progress-every 500
+```
+
+Height-slice visualization for a selected `labels.npz`:
+
+```bash
+python3 /home/lab/Downloads/render_observed_free_height_slices.py \
+  --labels /absolute/path/to/labels.npz \
+  --output /tmp/observed_free_height_slices.png \
+  --masked-output /tmp/observed_free_height_slices_masked.png
+```
+
+Display convention:
+
+- Image up: ego front, `+x`
+- Image left: ego left, `+y`
+- Black dot: ego origin
+- Black arrow: ego heading
+- Bright green `#23D25A`: ID 17 observed free
+- Light green `#A3D57C`: ID 11 driveable surface
+- Near white `#F5F5F5`: ID 255 unknown
+
+### Post-build mandatory consistency checks
+
+After Step 6C or any label mutation:
+
+1. Recompute actual NPZ class counts. Do not trust stale Step 6B `class_counts` fields.
+2. Verify ID 17 exists globally and in `mask_camera`.
+3. Verify no ID 17 remains below the lowest ID 11 in the same XY column.
+4. Verify IDs 0-16 were not overwritten by ID 17.
+5. Verify `mask_lidar` remains all False.
+6. Rerun Step 6 audit, edge diagnosis, and finalize.
+7. Rerun Step 7 tests and one real-sample delivery audit.
+8. Any prior Step 6 contract hash becomes stale after label mutation.
+
+### Known limitations and next development target
+
+- Buildings, walls, trees, vegetation, terrain meshes, curbs, and complete static obstacles are not represented by the current raw annotation contract.
+- Current class 17 can pass through unmodeled static obstacles because the raw inputs do not provide their geometry.
+- The next development task is to inspect the AlpaSim export source and every non-camera raw artifact to determine whether complete static world geometry can be exported.
+- Do not apply static pseudo-labels from RGB alone.
+- The full 2,311-Clip dataset must not be re-frozen with the current class 17 change until the small reference dataset is re-audited after below-road filtering and the static-geometry limitation is explicitly accepted.
+
+### Instructions for the next AI session
+
+1. Read this entire README, especially this final authoritative section.
+2. Do not rely on historical statements above that say class 17 is absent.
+3. Treat the small reference dataset as the development and validation target until explicitly instructed to update `outcome_full`.
+4. Before changing labels, determine whether the command is idempotent and which reports and hashes become stale.
+5. Do not inspect, stage, or commit Git changes. The user maintains Git.
+6. Run the complete relevant test suite after each coherent code batch.
+7. Continue automatically when validation succeeds and no user decision is required.
+8. Never reuse a sample ID across different raw roots merely because the Clip name is the same.
+9. Preserve the camera-only decision and all-False `mask_lidar`.
+10. The immediate next task is static-world-geometry source investigation and, if the user approves, a clean re-audit and re-freeze of the small reference dataset.
+<!-- CURRENT-FREEZE-END -->

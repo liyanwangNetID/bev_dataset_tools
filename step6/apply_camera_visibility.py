@@ -17,11 +17,12 @@ from step1.clip_manifest import CAMERA_NAMES
 from step6.camera_visibility import (
     load_assignment_index,
     load_camera_contract,
-    project_known_voxels,
+    project_voxel_contract,
 )
-from step6.contract import GRID, UNKNOWN_ID
+from step6.contract import GRID, OBSERVED_FREE_ID, UNKNOWN_ID
+from step6.filter_below_driveable import filter_below_driveable
 
-PRODUCTION_VISIBILITY_VERSION = "0.1.1"
+PRODUCTION_VISIBILITY_VERSION = "0.2.0"
 
 
 def read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
@@ -61,24 +62,26 @@ def load_scene_contracts(
     }
 
 
-def compute_mask(
+def compute_semantics_and_mask(
     semantics: np.ndarray,
     contracts: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, str]],
-) -> tuple[np.ndarray, dict[str, dict[str, int]]]:
-    combined = np.zeros(GRID.shape, dtype=bool)
+) -> tuple[np.ndarray, np.ndarray, dict[str, dict[str, int]]]:
+    original = semantics.copy()
+    free = np.zeros(GRID.shape, dtype=bool)
+    supervised = np.zeros(GRID.shape, dtype=bool)
     camera_stats = {}
     for camera_name in CAMERA_NAMES:
         extrinsic, k_rect, valid_mask, _ = contracts[camera_name]
-        camera_mask, stats = project_known_voxels(
-            semantics,
-            extrinsic,
-            k_rect,
-            valid_mask,
+        _, camera_free, camera_supervised, stats = project_voxel_contract(
+            original, extrinsic, k_rect, valid_mask
         )
-        combined |= camera_mask
+        free |= camera_free
+        supervised |= camera_supervised
         camera_stats[camera_name] = stats
-    return combined, camera_stats
-
+    updated = original.copy()
+    updated[free & (updated == UNKNOWN_ID)] = OBSERVED_FREE_ID
+    mask_camera = supervised & (updated != UNKNOWN_ID)
+    return updated, mask_camera, camera_stats
 
 def atomic_update_npz(
     label_path: Path,
@@ -157,7 +160,10 @@ def apply_visibility(
         if mask_lidar.any():
             raise ValueError(f"mask_lidar must remain all false: {label_path}")
 
-        mask_camera, camera_stats = compute_mask(semantics, active_contracts)
+        semantics, mask_camera, camera_stats = compute_semantics_and_mask(semantics, active_contracts)
+        semantics, mask_camera, below_road_stats = filter_below_driveable(
+            semantics, mask_camera
+        )
         if np.any(mask_camera & (semantics == UNKNOWN_ID)):
             raise RuntimeError(f"unknown voxel marked visible: {label_path}")
 
@@ -181,11 +187,13 @@ def apply_visibility(
         )
         aggregate_camera.update(
             {
-                camera_name: stats["zbuffer_visible"]
+                camera_name: stats["first_surface"]
                 for camera_name, stats in camera_stats.items()
             }
         )
         known_count = int(np.count_nonzero(semantics != UNKNOWN_ID))
+        free_count = int(np.count_nonzero(semantics == OBSERVED_FREE_ID))
+        visible_free_count = int(np.count_nonzero(mask_camera & (semantics == OBSERVED_FREE_ID)))
         visible_count = int(mask_camera.sum())
         records.append(
             {
@@ -193,7 +201,10 @@ def apply_visibility(
                 "scene_id": scene_id,
                 "labels_path": row["labels_path"],
                 "known_voxels": known_count,
+                "observed_free_voxels": free_count,
+                "visible_observed_free_voxels": visible_free_count,
                 "mask_camera_true": visible_count,
+                "below_road_filter": below_road_stats,
                 "visible_known_ratio": (
                     visible_count / known_count
                     if known_count
@@ -223,9 +234,12 @@ def apply_visibility(
         "label_manifest_sha256": sha256_file(label_manifest),
         "rectification_assignments": str(assignments_path),
         "rectification_assignments_sha256": sha256_file(assignments_path),
-        "policy": "known_semantic_voxel_centers_only + rectified_valid_mask + per_camera_zbuffer",
+        "policy": "valid_rectified_camera_frustum unknown-to-17; mask_camera only through first known surface",
         "unknown_voxels_visible": False,
-        "observed_free_generated": False,
+        "observed_free_generated": True,
+        "observed_free_id": OBSERVED_FREE_ID,
+        "observed_free_voxel_count": int(visible_class_counts.get(OBSERVED_FREE_ID, 0)) + int(sum(record["observed_free_voxels"] - record["visible_observed_free_voxels"] for record in records)),
+        "visible_observed_free_voxel_count": int(visible_class_counts.get(OBSERVED_FREE_ID, 0)),
         "mask_lidar_policy": "all_false_no_lidar",
         "camera_contract_cache_policy": "active_scene_only",
         "mask_camera_true_minimum": min(visible_counts, default=0),

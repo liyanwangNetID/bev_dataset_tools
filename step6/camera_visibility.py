@@ -20,10 +20,10 @@ import numpy as np
 from project_paths import ALPASIM_DATA_ROOT, MANIFEST_ROOT, OUTCOME_ROOT, REPORT_ROOT
 from step1.clip_manifest import CAMERA_NAMES
 from step2.calibration import read_camera_calibration
-from step6.contract import GRID, UNKNOWN_ID
+from step6.contract import GRID, OBSERVED_FREE_ID, UNKNOWN_ID
 from step6.source_geometry import quaternion_matrix
 
-VISIBILITY_VERSION = "0.1.0"
+VISIBILITY_VERSION = "0.2.0"
 TARGET_WIDTH = 960
 TARGET_HEIGHT = 540
 
@@ -67,57 +67,108 @@ def voxel_centers(indices: np.ndarray) -> np.ndarray:
     )
 
 
+def project_voxel_contract(
+    semantics: np.ndarray,
+    rig_to_camera: np.ndarray,
+    k_rect: np.ndarray,
+    valid_pixel_mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, int]]:
+    """Project all voxel centers and derive frustum, supervision, and free masks.
+
+    ``frustum`` contains every voxel whose center projects through a valid
+    rectified pixel with positive camera depth. Unknown voxels in this region
+    become semantic ID 17. ``supervised`` is deliberately narrower: for pixels
+    with a known occupied surface, it contains voxels no farther than the first
+    occupied surface, plus that first surface. This makes any free voxel behind
+    the first known surface ignorable with mask_camera.
+    """
+    all_indices = np.indices(GRID.shape, dtype=np.int16).reshape(3, -1).T
+    points = voxel_centers(all_indices)
+    homogeneous = np.concatenate([points, np.ones((len(points), 1))], axis=1)
+    camera = (homogeneous @ np.asarray(rig_to_camera, dtype=np.float64).T)[:, :3]
+    depth = camera[:, 2]
+    positive = depth > 1e-6
+
+    frustum_flat = np.zeros(len(all_indices), dtype=bool)
+    source_ids = np.flatnonzero(positive)
+    if len(source_ids):
+        cam = camera[source_ids]
+        uvw = cam @ np.asarray(k_rect, dtype=np.float64).T
+        px = np.rint(uvw[:, 0] / uvw[:, 2]).astype(np.int64)
+        py = np.rint(uvw[:, 1] / uvw[:, 2]).astype(np.int64)
+        inside = (px >= 0) & (px < TARGET_WIDTH) & (py >= 0) & (py < TARGET_HEIGHT)
+        valid_local = np.flatnonzero(inside)
+        if len(valid_local):
+            valid_local = valid_local[valid_pixel_mask[py[valid_local], px[valid_local]]]
+        source_ids = source_ids[valid_local]
+        px = px[valid_local]
+        py = py[valid_local]
+        frustum_flat[source_ids] = True
+    else:
+        px = np.empty(0, dtype=np.int64)
+        py = np.empty(0, dtype=np.int64)
+
+    frustum = frustum_flat.reshape(GRID.shape)
+    occupied_flat = (semantics.reshape(-1) != UNKNOWN_ID) & (semantics.reshape(-1) != OBSERVED_FREE_ID)
+    known_local = np.flatnonzero(occupied_flat[source_ids])
+    supervised_flat = np.zeros(len(all_indices), dtype=bool)
+    first_surface_flat = np.zeros(len(all_indices), dtype=bool)
+
+    if len(known_local):
+        known_source = source_ids[known_local]
+        known_pixel = py[known_local] * TARGET_WIDTH + px[known_local]
+        known_depth = depth[known_source]
+        order = np.lexsort((known_depth, known_pixel))
+        sorted_pixels = known_pixel[order]
+        first = np.ones(len(order), dtype=bool)
+        first[1:] = sorted_pixels[1:] != sorted_pixels[:-1]
+        winner_local = known_local[order[first]]
+        winner_source = source_ids[winner_local]
+        winner_pixels = py[winner_local] * TARGET_WIDTH + px[winner_local]
+        winner_depths = depth[winner_source]
+        first_surface_flat[winner_source] = True
+
+        all_pixel = py * TARGET_WIDTH + px
+        surface_depth = np.full(TARGET_WIDTH * TARGET_HEIGHT, np.inf, dtype=np.float32)
+        surface_depth[winner_pixels] = winner_depths.astype(np.float32)
+        ray_has_surface = np.isfinite(surface_depth[all_pixel])
+        supervised_local = ray_has_surface & (
+            depth[source_ids] <= surface_depth[all_pixel] + GRID.voxel_size * 0.75
+        )
+        supervised_flat[source_ids[supervised_local]] = True
+
+    free = frustum & (semantics == UNKNOWN_ID)
+    supervised = supervised_flat.reshape(GRID.shape)
+    first_surface = first_surface_flat.reshape(GRID.shape)
+    stats = {
+        'grid_voxels': int(np.prod(GRID.shape)),
+        'positive_depth': int(positive.sum()),
+        'valid_frustum': int(frustum.sum()),
+        'observed_free_candidates': int(free.sum()),
+        'first_surface': int(first_surface.sum()),
+        'supervised': int(supervised.sum()),
+    }
+    return frustum, free, supervised, stats
+
+
 def project_known_voxels(
     semantics: np.ndarray,
     rig_to_camera: np.ndarray,
     k_rect: np.ndarray,
     valid_pixel_mask: np.ndarray,
 ) -> tuple[np.ndarray, dict[str, int]]:
-    """Return a conservative z-buffered visibility mask for known voxels."""
-    known_indices = np.argwhere(semantics != UNKNOWN_ID)
-    visible = np.zeros(semantics.shape, dtype=bool)
-    if not len(known_indices):
-        return visible, {"known": 0, "positive_depth": 0, "valid_projection": 0, "zbuffer_visible": 0}
-
-    points = voxel_centers(known_indices)
-    homogeneous = np.concatenate([points, np.ones((len(points), 1))], axis=1)
-    camera = (homogeneous @ np.asarray(rig_to_camera, dtype=np.float64).T)[:, :3]
-    depth = camera[:, 2]
-    positive = depth > 1e-6
-    pos_ids = np.flatnonzero(positive)
-    if not len(pos_ids):
-        return visible, {"known": len(known_indices), "positive_depth": 0, "valid_projection": 0, "zbuffer_visible": 0}
-
-    cam = camera[pos_ids]
-    uvw = cam @ np.asarray(k_rect, dtype=np.float64).T
-    u = uvw[:, 0] / uvw[:, 2]
-    v = uvw[:, 1] / uvw[:, 2]
-    px = np.rint(u).astype(np.int64)
-    py = np.rint(v).astype(np.int64)
-    inside = (px >= 0) & (px < TARGET_WIDTH) & (py >= 0) & (py < TARGET_HEIGHT)
-    valid_ids = np.flatnonzero(inside)
-    if len(valid_ids):
-        valid_ids = valid_ids[valid_pixel_mask[py[valid_ids], px[valid_ids]]]
-    if not len(valid_ids):
-        return visible, {"known": len(known_indices), "positive_depth": len(pos_ids), "valid_projection": 0, "zbuffer_visible": 0}
-
-    source_ids = pos_ids[valid_ids]
-    pixel_ids = py[valid_ids] * TARGET_WIDTH + px[valid_ids]
-    candidate_depth = depth[source_ids]
-    order = np.lexsort((candidate_depth, pixel_ids))
-    sorted_pixels = pixel_ids[order]
-    first = np.ones(len(order), dtype=bool)
-    first[1:] = sorted_pixels[1:] != sorted_pixels[:-1]
-    winners = source_ids[order[first]]
-    voxels = known_indices[winners]
-    visible[voxels[:, 0], voxels[:, 1], voxels[:, 2]] = True
-    return visible, {
-        "known": int(len(known_indices)),
-        "positive_depth": int(len(pos_ids)),
-        "valid_projection": int(len(valid_ids)),
-        "zbuffer_visible": int(len(winners)),
+    """Compatibility wrapper returning the new supervised camera mask."""
+    _, _, supervised, stats = project_voxel_contract(
+        semantics, rig_to_camera, k_rect, valid_pixel_mask
+    )
+    return supervised, {
+        'known': int(np.count_nonzero((semantics != UNKNOWN_ID) & (semantics != OBSERVED_FREE_ID))),
+        'positive_depth': stats['positive_depth'],
+        'valid_projection': stats['valid_frustum'],
+        'zbuffer_visible': stats['first_surface'],
+        'supervised': stats['supervised'],
+        'observed_free_candidates': stats['observed_free_candidates'],
     }
-
 
 def load_camera_contract(
     scene_id: str,

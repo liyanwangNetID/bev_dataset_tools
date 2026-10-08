@@ -13,7 +13,7 @@ import numpy as np
 from project_paths import MANIFEST_ROOT, OUTCOME_ROOT, REPORT_ROOT
 from step6.contract import GRID, OCC3D_CLASSES, UNKNOWN_ID
 
-AUDIT_VERSION = "0.1.0"
+AUDIT_VERSION = "0.2.0"
 ALLOWED_CLASS_IDS = frozenset(OCC3D_CLASSES)
 
 
@@ -141,8 +141,12 @@ def audit_labels(
         failures.append("visibility summary record_count mismatch")
     if stored_visibility_summary.get("unknown_voxels_visible") is not False:
         failures.append("visibility summary does not freeze unknown_voxels_visible=false")
-    if stored_visibility_summary.get("observed_free_generated") is not False:
-        failures.append("visibility summary does not freeze observed_free_generated=false")
+    if stored_visibility_summary.get("observed_free_generated") is not True:
+        failures.append("visibility summary does not freeze observed_free_generated=true")
+    if semantic_counts.get(17, 0) <= 0:
+        failures.append("observed-free semantic ID 17 is absent")
+    if visible_class_counts.get(17, 0) <= 0:
+        failures.append("camera-visible observed-free semantic ID 17 is absent")
 
     summary = {
         "audit_version": AUDIT_VERSION,
@@ -186,8 +190,8 @@ def audit_labels(
             "unknown_id": UNKNOWN_ID,
             "unknown_voxels_visible": False,
             "mask_lidar_policy": "all_false_no_lidar",
-            "observed_free_generated": False,
-            "camera_visibility_policy": "known_semantic_voxel_centers_only + rectified_valid_mask + per_camera_zbuffer",
+            "observed_free_generated": True,
+            "camera_visibility_policy": "valid rectified frustum creates 17; mask_camera only through first known surface",
         },
     }
     edge_cases = zero_visibility + full_visibility
