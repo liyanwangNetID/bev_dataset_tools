@@ -22,7 +22,7 @@ from step6.camera_visibility import (
 from step6.contract import GRID, OBSERVED_FREE_ID, UNKNOWN_ID
 from step6.filter_below_driveable import filter_below_driveable
 
-PRODUCTION_VISIBILITY_VERSION = "0.3.1"
+PRODUCTION_VISIBILITY_VERSION = "0.3.3"
 
 
 def read_jsonl(path: Path) -> Iterable[dict[str, Any]]:

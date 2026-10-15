@@ -23,9 +23,11 @@ from step2.calibration import read_camera_calibration
 from step6.contract import GRID, OBSERVED_FREE_ID, UNKNOWN_ID
 from step6.source_geometry import quaternion_matrix
 
-VISIBILITY_VERSION = "0.3.1"
+VISIBILITY_VERSION = "0.3.3"
 TARGET_WIDTH = 960
 TARGET_HEIGHT = 540
+# A valid ray without a known surface remains open until it exits the occupancy grid.
+# This is geometry-derived and introduces no arbitrary metric cutoff.
 
 
 def read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
@@ -164,13 +166,25 @@ def project_voxel_contract(
 
         valid_surface = valid_pixel_mask.reshape(-1)
         surface_depth[~valid_surface] = np.inf
+    # Classify every valid projected voxel, including scenes/cameras with no
+    # known surface at all. A pixel with a known surface is supervised only up
+    # to that nearest depth. A pixel without a surface is an open ray and is
+    # supervised until the ray exits the finite occupancy grid.
+    if len(source_ids):
         query_pixel = py * TARGET_WIDTH + px
         query_surface_depth = surface_depth[query_pixel]
         ray_has_surface = np.isfinite(query_surface_depth)
-        supervised_local = ray_has_surface & (
+        surface_ray = ray_has_surface & (
             depth[source_ids] <= query_surface_depth + GRID.voxel_size * 0.75
         )
+        open_ray = ~ray_has_surface
+        supervised_local = surface_ray | open_ray
         supervised_flat[source_ids[supervised_local]] = True
+        surface_count = int(np.count_nonzero(surface_ray))
+        open_count = int(np.count_nonzero(open_ray))
+    else:
+        surface_count = 0
+        open_count = 0
 
     free = frustum & (semantics == UNKNOWN_ID)
     supervised = supervised_flat.reshape(GRID.shape)
@@ -182,6 +196,9 @@ def project_voxel_contract(
         "observed_free_candidates": int(free.sum()),
         "first_surface": exact_first_surface_count,
         "footprint_surface_pixels": int(np.isfinite(surface_depth).sum()),
+        "surface_bounded_supervised": surface_count,
+        "grid_bounded_open_ray_supervised": open_count,
+        "open_ray_limit_policy": "occupancy_grid_exit",
         "supervised": int(supervised.sum()),
     }
     return frustum, free, supervised, stats

@@ -29,11 +29,13 @@ def test_observed_free_is_limited_to_supervised_ray_before_surface():
     assert all(value["verified_observed_free"] > 0 for value in stats.values())
 
 
-def test_valid_frustum_without_known_surface_stays_unknown():
+def test_valid_frustum_without_known_surface_uses_bounded_open_ray_free():
     semantics = np.full(GRID.shape, UNKNOWN_ID, dtype=np.uint8)
 
     updated, mask_camera, stats = compute_semantics_and_mask(semantics, _contracts())
 
-    assert not np.any(updated == OBSERVED_FREE_ID)
-    assert not mask_camera.any()
-    assert all(value["verified_observed_free"] == 0 for value in stats.values())
+    assert np.any(updated == OBSERVED_FREE_ID)
+    assert np.all(mask_camera[updated == OBSERVED_FREE_ID])
+    assert not np.any(mask_camera[updated == UNKNOWN_ID])
+    assert all(value["verified_observed_free"] > 0 for value in stats.values())
+    assert all(value["grid_bounded_open_ray_supervised"] > 0 for value in stats.values())

@@ -31,7 +31,7 @@ def test_observed_free_preserves_occupied_and_marks_valid_frustum():
     assert np.all(frustum[supervised])
 
 
-def test_rays_without_known_surface_are_not_supervised():
+def test_rays_without_known_surface_are_supervised_to_grid_exit():
     semantics = np.full(GRID.shape, UNKNOWN_ID, dtype=np.uint8)
     extrinsic, intrinsic, valid = _camera()
     frustum, free, supervised, stats = project_voxel_contract(
@@ -39,4 +39,7 @@ def test_rays_without_known_surface_are_not_supervised():
     )
     assert stats["valid_frustum"] > 0
     assert np.count_nonzero(free) > 0
-    assert np.count_nonzero(supervised) == 0
+    assert np.array_equal(supervised, frustum)
+    assert stats["surface_bounded_supervised"] == 0
+    assert stats["grid_bounded_open_ray_supervised"] == int(frustum.sum())
+    assert stats["open_ray_limit_policy"] == "occupancy_grid_exit"
