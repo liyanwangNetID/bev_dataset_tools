@@ -13,10 +13,12 @@ from typing import Any, Iterable
 import numpy as np
 
 from project_paths import ALPASIM_DATA_ROOT, MANIFEST_ROOT, OUTCOME_ROOT, REPORT_ROOT
+from step2.static_occupancy_reader import StaticOccupancyColumns, read_static_occupancy
 from step6.contract import GRID, UNKNOWN_ID
 from step6.source_geometry import normalize_lane
+from step6.static_occupancy import voxelize_static_occupancy
 
-VOXELIZER_VERSION = "0.1.2"
+VOXELIZER_VERSION = "0.3.0"
 LABEL_SCHEMA_VERSION = "0.1"
 
 
@@ -143,7 +145,12 @@ def voxelize_lane_ribbon(semantics: np.ndarray, lane: dict[str, Any]) -> int:
     return written
 
 
-def voxelize_sample(source: dict[str, Any], keyframe: dict[str, Any], vector_map: dict[str, Any]) -> tuple[np.ndarray, dict[str, int]]:
+def voxelize_sample(
+    source: dict[str, Any],
+    keyframe: dict[str, Any],
+    vector_map: dict[str, Any],
+    static_columns: StaticOccupancyColumns | None = None,
+) -> tuple[np.ndarray, dict[str, int]]:
     semantics = np.full(GRID.shape, UNKNOWN_ID, dtype=np.uint8)
     ego2map = np.asarray(keyframe["current_ego2global"], dtype=np.float64)
     lane_voxels = 0
@@ -151,6 +158,13 @@ def voxelize_sample(source: dict[str, Any], keyframe: dict[str, Any], vector_map
         lane = normalize_lane(raw_lane, ego2map)
         if lane is not None:
             lane_voxels += voxelize_lane_ribbon(semantics, lane)
+
+    # Static geometry is written after the road surface so ID 11 is preserved,
+    # and before actors so specific traffic-participant semantics can override ID 0.
+    static_stats = None
+    if static_columns is not None:
+        static_stats = voxelize_static_occupancy(semantics, static_columns, ego2map)
+
     actor_voxels = 0
     for actor in source["sources"]["actors"]:
         actor_voxels += voxelize_actor(semantics, actor)
@@ -158,6 +172,9 @@ def voxelize_sample(source: dict[str, Any], keyframe: dict[str, Any], vector_map
     stats = {
         "lane_voxel_writes": lane_voxels,
         "actor_voxel_writes": actor_voxels,
+        "static_source_columns": len(static_columns) if static_columns is not None else 0,
+        "static_voxel_writes": static_stats.written_static_voxels if static_stats is not None else 0,
+        "static_preserved_semantic_voxels": static_stats.preserved_semantic_voxels if static_stats is not None else 0,
         "unknown_voxels": counts[UNKNOWN_ID],
         "known_voxels": int(semantics.size - counts[UNKNOWN_ID]),
     }
@@ -184,10 +201,14 @@ def build_labels(
     # RSS bounded without changing any generated labels.
     active_map_path: Path | None = None
     active_vector_map: dict[str, Any] | None = None
+    active_scene_id: str | None = None
+    active_static_columns: StaticOccupancyColumns | None = None
     output_rows = []
     aggregate_classes = Counter()
     total_lane_writes = 0
     total_actor_writes = 0
+    total_static_writes = 0
+    total_static_preserved = 0
 
     for index, (source, keyframe) in enumerate(zip(source_rows, keyframe_rows, strict=True), 1):
         if limit is not None and index > limit:
@@ -199,7 +220,14 @@ def build_labels(
             active_vector_map = json.loads(map_path.read_text(encoding="utf-8"))
             active_map_path = map_path
         assert active_vector_map is not None
-        semantics, stats = voxelize_sample(source, keyframe, active_vector_map)
+        scene_id = source["scene_id"]
+        if scene_id != active_scene_id:
+            active_static_columns = read_static_occupancy(dataset_root / scene_id)
+            active_scene_id = scene_id
+        assert active_static_columns is not None
+        semantics, stats = voxelize_sample(
+            source, keyframe, active_vector_map, active_static_columns
+        )
         sample_dir = output_root / source["scene_id"] / source["sample_id"]
         sample_dir.mkdir(parents=True, exist_ok=True)
         label_path = sample_dir / "labels.npz"
@@ -210,6 +238,8 @@ def build_labels(
         aggregate_classes.update({int(k): v for k, v in class_counts.items()})
         total_lane_writes += stats["lane_voxel_writes"]
         total_actor_writes += stats["actor_voxel_writes"]
+        total_static_writes += stats["static_voxel_writes"]
+        total_static_preserved += stats["static_preserved_semantic_voxels"]
         output_rows.append({
             "label_schema_version": LABEL_SCHEMA_VERSION,
             "voxelizer_version": VOXELIZER_VERSION,
@@ -220,6 +250,10 @@ def build_labels(
             "class_counts": class_counts,
             "lane_voxel_writes": stats["lane_voxel_writes"],
             "actor_voxel_writes": stats["actor_voxel_writes"],
+            "static_source_columns": stats["static_source_columns"],
+            "static_voxel_writes": stats["static_voxel_writes"],
+            "static_preserved_semantic_voxels": stats["static_preserved_semantic_voxels"],
+            "static_occupancy_semantic_id": 0,
             "mask_camera_policy": "all_false_pending_visibility_step",
             "mask_lidar_policy": "all_false_no_lidar",
         })
@@ -239,6 +273,12 @@ def build_labels(
         "class_voxel_counts": {str(k): v for k, v in sorted(aggregate_classes.items())},
         "lane_voxel_writes_total": total_lane_writes,
         "actor_voxel_writes_total": total_actor_writes,
+        "static_voxel_writes_total": total_static_writes,
+        "static_preserved_semantic_voxels_total": total_static_preserved,
+        "static_occupancy_required": True,
+        "static_occupancy_semantic_id": 0,
+        "static_occupancy_frame": "map",
+        "static_occupancy_cache_policy": "active_scene_only",
         "mask_camera_policy": "all_false_pending_visibility_step",
         "mask_lidar_policy": "all_false_no_lidar",
         "observed_free_generated": False,

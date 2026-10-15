@@ -22,5 +22,5 @@ def test_compute_semantics_and_mask_unions_camera_masks():
     updated, mask_camera, stats = compute_semantics_and_mask(semantics, contracts)
 
     assert updated.shape == GRID.shape
-    assert mask_camera.sum() == 1
+    assert mask_camera.sum() > 1
     assert all(value["first_surface"] == 1 for value in stats.values())

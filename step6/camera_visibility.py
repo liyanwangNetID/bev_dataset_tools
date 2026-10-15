@@ -23,7 +23,7 @@ from step2.calibration import read_camera_calibration
 from step6.contract import GRID, OBSERVED_FREE_ID, UNKNOWN_ID
 from step6.source_geometry import quaternion_matrix
 
-VISIBILITY_VERSION = "0.2.0"
+VISIBILITY_VERSION = "0.3.1"
 TARGET_WIDTH = 960
 TARGET_HEIGHT = 540
 
@@ -73,14 +73,14 @@ def project_voxel_contract(
     k_rect: np.ndarray,
     valid_pixel_mask: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, int]]:
-    """Project all voxel centers and derive frustum, supervision, and free masks.
+    """Project the grid and build a conservative dense first-surface depth buffer.
 
-    ``frustum`` contains every voxel whose center projects through a valid
-    rectified pixel with positive camera depth. Unknown voxels in this region
-    become semantic ID 17. ``supervised`` is deliberately narrower: for pixels
-    with a known occupied surface, it contains voxels no farther than the first
-    occupied surface, plus that first surface. This makes any free voxel behind
-    the first known surface ignorable with mask_camera.
+    Occupied voxel centers still determine the exact first occupied voxel per
+    projected pixel. To avoid pin-hole gaps caused by representing a 0.4 m cube
+    as one image point, each occupied center also contributes a depth-adaptive
+    image footprint. Unknown voxels are verified free only when their center is
+    in front of that footprint depth. Voxels behind the nearest surface remain
+    unsupervised and therefore remain ID 255.
     """
     all_indices = np.indices(GRID.shape, dtype=np.int16).reshape(3, -1).T
     points = voxel_centers(all_indices)
@@ -94,46 +94,81 @@ def project_voxel_contract(
     if len(source_ids):
         cam = camera[source_ids]
         uvw = cam @ np.asarray(k_rect, dtype=np.float64).T
-        px = np.rint(uvw[:, 0] / uvw[:, 2]).astype(np.int64)
-        py = np.rint(uvw[:, 1] / uvw[:, 2]).astype(np.int64)
-        inside = (px >= 0) & (px < TARGET_WIDTH) & (py >= 0) & (py < TARGET_HEIGHT)
+        px_all = np.rint(uvw[:, 0] / uvw[:, 2]).astype(np.int64)
+        py_all = np.rint(uvw[:, 1] / uvw[:, 2]).astype(np.int64)
+        inside = (
+            (px_all >= 0) & (px_all < TARGET_WIDTH)
+            & (py_all >= 0) & (py_all < TARGET_HEIGHT)
+        )
         valid_local = np.flatnonzero(inside)
         if len(valid_local):
-            valid_local = valid_local[valid_pixel_mask[py[valid_local], px[valid_local]]]
+            valid_local = valid_local[
+                valid_pixel_mask[py_all[valid_local], px_all[valid_local]]
+            ]
         source_ids = source_ids[valid_local]
-        px = px[valid_local]
-        py = py[valid_local]
+        px = px_all[valid_local]
+        py = py_all[valid_local]
         frustum_flat[source_ids] = True
     else:
         px = np.empty(0, dtype=np.int64)
         py = np.empty(0, dtype=np.int64)
 
     frustum = frustum_flat.reshape(GRID.shape)
-    occupied_flat = (semantics.reshape(-1) != UNKNOWN_ID) & (semantics.reshape(-1) != OBSERVED_FREE_ID)
-    known_local = np.flatnonzero(occupied_flat[source_ids])
-    supervised_flat = np.zeros(len(all_indices), dtype=bool)
+    occupied_flat = (
+        (semantics.reshape(-1) != UNKNOWN_ID)
+        & (semantics.reshape(-1) != OBSERVED_FREE_ID)
+    )
+    source_occupied = occupied_flat[source_ids]
+    known_local = np.flatnonzero(source_occupied)
+
     first_surface_flat = np.zeros(len(all_indices), dtype=bool)
+    supervised_flat = np.zeros(len(all_indices), dtype=bool)
+    surface_depth = np.full(TARGET_WIDTH * TARGET_HEIGHT, np.inf, dtype=np.float32)
+    exact_first_surface_count = 0
 
     if len(known_local):
         known_source = source_ids[known_local]
         known_pixel = py[known_local] * TARGET_WIDTH + px[known_local]
         known_depth = depth[known_source]
+
+        # Exact nearest occupied center per pixel, retained for semantic-surface
+        # statistics and compatibility with the earlier z-buffer contract.
         order = np.lexsort((known_depth, known_pixel))
         sorted_pixels = known_pixel[order]
         first = np.ones(len(order), dtype=bool)
         first[1:] = sorted_pixels[1:] != sorted_pixels[:-1]
         winner_local = known_local[order[first]]
         winner_source = source_ids[winner_local]
-        winner_pixels = py[winner_local] * TARGET_WIDTH + px[winner_local]
-        winner_depths = depth[winner_source]
         first_surface_flat[winner_source] = True
+        exact_first_surface_count = int(len(winner_source))
 
-        all_pixel = py * TARGET_WIDTH + px
-        surface_depth = np.full(TARGET_WIDTH * TARGET_HEIGHT, np.inf, dtype=np.float32)
-        surface_depth[winner_pixels] = winner_depths.astype(np.float32)
-        ray_has_surface = np.isfinite(surface_depth[all_pixel])
+        # Rasterize a small, depth-adaptive footprint for each 0.4 m occupied
+        # voxel. Grouped OpenCV dilation computes a nearest-depth footprint
+        # efficiently while avoiding a Python loop over every voxel.
+        focal = max(abs(float(k_rect[0, 0])), abs(float(k_rect[1, 1])))
+        half_extent = GRID.voxel_size * 0.5
+        radii = np.ceil(focal * half_extent / np.maximum(known_depth, 1e-3)).astype(np.int32)
+        radii = np.clip(radii, 1, 8)
+        for radius in range(1, 9):
+            group = radii == radius
+            if not np.any(group):
+                continue
+            exact = np.full(TARGET_WIDTH * TARGET_HEIGHT, np.inf, dtype=np.float32)
+            np.minimum.at(exact, known_pixel[group], known_depth[group].astype(np.float32))
+            exact = exact.reshape(TARGET_HEIGHT, TARGET_WIDTH)
+            negative = np.where(np.isfinite(exact), -exact, -1.0e9).astype(np.float32)
+            kernel = np.ones((2 * radius + 1, 2 * radius + 1), dtype=np.uint8)
+            expanded_negative = cv2.dilate(negative, kernel)
+            expanded = np.where(expanded_negative > -1.0e8, -expanded_negative, np.inf)
+            surface_depth = np.minimum(surface_depth, expanded.reshape(-1))
+
+        valid_surface = valid_pixel_mask.reshape(-1)
+        surface_depth[~valid_surface] = np.inf
+        query_pixel = py * TARGET_WIDTH + px
+        query_surface_depth = surface_depth[query_pixel]
+        ray_has_surface = np.isfinite(query_surface_depth)
         supervised_local = ray_has_surface & (
-            depth[source_ids] <= surface_depth[all_pixel] + GRID.voxel_size * 0.75
+            depth[source_ids] <= query_surface_depth + GRID.voxel_size * 0.75
         )
         supervised_flat[source_ids[supervised_local]] = True
 
@@ -141,15 +176,15 @@ def project_voxel_contract(
     supervised = supervised_flat.reshape(GRID.shape)
     first_surface = first_surface_flat.reshape(GRID.shape)
     stats = {
-        'grid_voxels': int(np.prod(GRID.shape)),
-        'positive_depth': int(positive.sum()),
-        'valid_frustum': int(frustum.sum()),
-        'observed_free_candidates': int(free.sum()),
-        'first_surface': int(first_surface.sum()),
-        'supervised': int(supervised.sum()),
+        "grid_voxels": int(np.prod(GRID.shape)),
+        "positive_depth": int(positive.sum()),
+        "valid_frustum": int(frustum.sum()),
+        "observed_free_candidates": int(free.sum()),
+        "first_surface": exact_first_surface_count,
+        "footprint_surface_pixels": int(np.isfinite(surface_depth).sum()),
+        "supervised": int(supervised.sum()),
     }
     return frustum, free, supervised, stats
-
 
 def project_known_voxels(
     semantics: np.ndarray,

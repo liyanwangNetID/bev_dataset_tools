@@ -22,7 +22,7 @@ from step6.camera_visibility import (
 from step6.contract import GRID, OBSERVED_FREE_ID, UNKNOWN_ID
 from step6.filter_below_driveable import filter_below_driveable
 
-PRODUCTION_VISIBILITY_VERSION = "0.2.0"
+PRODUCTION_VISIBILITY_VERSION = "0.3.1"
 
 
 def read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
@@ -67,7 +67,7 @@ def compute_semantics_and_mask(
     contracts: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, str]],
 ) -> tuple[np.ndarray, np.ndarray, dict[str, dict[str, int]]]:
     original = semantics.copy()
-    free = np.zeros(GRID.shape, dtype=bool)
+    verified_free = np.zeros(GRID.shape, dtype=bool)
     supervised = np.zeros(GRID.shape, dtype=bool)
     camera_stats = {}
     for camera_name in CAMERA_NAMES:
@@ -75,11 +75,19 @@ def compute_semantics_and_mask(
         _, camera_free, camera_supervised, stats = project_voxel_contract(
             original, extrinsic, k_rect, valid_mask
         )
-        free |= camera_free
+        # A voxel is semantic observed-free only when the same camera ray is
+        # supervised through a known first surface. Merely lying in a valid
+        # frustum is insufficient: voxels behind a surface and rays with no
+        # known endpoint remain ID 255.
+        verified_free |= camera_free & camera_supervised
         supervised |= camera_supervised
+        stats = dict(stats)
+        stats["verified_observed_free"] = int(
+            np.count_nonzero(camera_free & camera_supervised)
+        )
         camera_stats[camera_name] = stats
     updated = original.copy()
-    updated[free & (updated == UNKNOWN_ID)] = OBSERVED_FREE_ID
+    updated[verified_free & (updated == UNKNOWN_ID)] = OBSERVED_FREE_ID
     mask_camera = supervised & (updated != UNKNOWN_ID)
     return updated, mask_camera, camera_stats
 

@@ -9,8 +9,13 @@ def test_canonical_hash_is_order_independent():
     assert canonical_hash({"b": 2, "a": 1}) == canonical_hash({"a": 1, "b": 2})
 
 
-def test_manifest_index_rejects_unknown_sample():
-    index = ManifestIndex()
+def test_manifest_index_rejects_unknown_sample(tmp_path):
+    paths = []
+    for name in ("keyframes.jsonl", "labels.jsonl", "sources.jsonl"):
+        path = tmp_path / name
+        path.write_text("", encoding="utf-8")
+        paths.append(path)
+    index = ManifestIndex(*paths)
     with pytest.raises(KeyError, match="unknown sample_id"):
         index.get("does_not_exist")
 

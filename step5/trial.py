@@ -26,13 +26,7 @@ TARGET_HEIGHT = 540
 WIDE_FOCAL = 480.0
 TELE_FOCAL = 1925.175
 PRINCIPAL_POINT = (479.5, 269.5)
-DEFAULT_SCENES = (
-    "test_clip_001",
-    "test_clip_250",
-    "test_clip_500",
-    "test_clip_750",
-    "test_clip_908",
-)
+DEFAULT_TRIAL_SCENE_COUNT = 5
 RECTIFICATION_SOURCE = Path(
     "/home/lab/alpasim/src/driver/src/alpasim_driver/rectification.py"
 )
@@ -127,15 +121,35 @@ def read_manifest_records(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def evenly_spaced_scene_ids(scene_ids: tuple[str, ...], count: int) -> tuple[str, ...]:
+    """Choose up to count deterministic scenes across the active manifest."""
+    if count <= 0:
+        raise ValueError("trial scene count must be positive")
+    if not scene_ids:
+        raise ValueError("manifest contains no scenes")
+    if len(scene_ids) <= count:
+        return scene_ids
+    indices = np.linspace(0, len(scene_ids) - 1, num=count, dtype=np.int64)
+    return tuple(scene_ids[int(index)] for index in indices)
+
+
 def select_trial_records(
     records: list[dict[str, Any]],
-    scene_ids: tuple[str, ...],
+    scene_ids: tuple[str, ...] | None = None,
+    *,
+    default_scene_count: int = DEFAULT_TRIAL_SCENE_COUNT,
 ) -> list[dict[str, Any]]:
     by_scene: dict[str, list[dict[str, Any]]] = {}
     for record in records:
         by_scene.setdefault(record["scene_id"], []).append(record)
+    available_scene_ids = tuple(sorted(by_scene))
+    selected_scene_ids = (
+        scene_ids
+        if scene_ids
+        else evenly_spaced_scene_ids(available_scene_ids, default_scene_count)
+    )
     selected = []
-    for scene_id in scene_ids:
+    for scene_id in selected_scene_ids:
         candidates = by_scene.get(scene_id, [])
         if not candidates:
             raise ValueError(f"scene not present in manifest: {scene_id}")
@@ -290,7 +304,10 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=OUTCOME_ROOT / "review" / "step5_rectification_trial_v0.1",
     )
-    parser.add_argument("--scenes", nargs="*", default=list(DEFAULT_SCENES))
+    parser.add_argument(
+        "--scenes", nargs="*", default=None,
+        help="optional explicit scene IDs; default selects up to five evenly spaced scenes from the active manifest",
+    )
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
 
@@ -304,7 +321,9 @@ def main() -> int:
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True)
     records = read_manifest_records(args.manifest)
-    selected = select_trial_records(records, tuple(args.scenes))
+    selected = select_trial_records(
+        records, tuple(args.scenes) if args.scenes else None
+    )
     metadata = [
         process_record(record, args.raw_root.expanduser().resolve(), output_root)
         for record in selected
