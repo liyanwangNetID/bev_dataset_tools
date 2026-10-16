@@ -11,7 +11,7 @@ from typing import Any
 
 from project_paths import MANIFEST_ROOT, OUTCOME_ROOT, REPORT_ROOT
 
-FINALIZER_VERSION = "0.3.0"
+FINALIZER_VERSION = "0.4.0"
 
 
 def sha256_file(path: Path) -> str:
@@ -165,7 +165,7 @@ def finalize(
 
     contract = {
         "step": 6,
-        "contract_version": "0.1",
+        "contract_version": "0.3",
         "finalizer_version": FINALIZER_VERSION,
         "status": "frozen" if not failures else "failed",
         "record_count": expected_record_count,
@@ -192,6 +192,11 @@ def finalize(
         "edge_case_resolution": edge_classification,
         "source_boundary": {
             "input": f"{expected_scene_count} local Clips only",
+            "static_occupancy_source": "per-Clip static_occupancy/columns.npz",
+            "static_occupancy_representation": "single_interval_2p5d_static_occupancy_road_filtered",
+            "static_occupancy_frame": "map",
+            "static_occupancy_grid_size_xy_m": 0.4,
+            "static_occupancy_semantic_id": 0,
             "usdz_used": False,
             "remote_download_used": False,
             "virtual_lidar_used": False,
@@ -201,9 +206,15 @@ def finalize(
             "recorded_actor_without_direct_occ3d_type": "others=0",
             "unverifiable_space": "unknown=255",
             "observed_free_17_generated": True,
+            "static_occupancy_source": "unlabeled road-filtered 2.5D columns mapped to others=0",
             "driveable_surface_source": "VectorMap lane ribbons",
             "actor_source": "current Actor oriented 3D boxes",
-            "mask_camera": "valid rectified frustum creates 17; supervision only through first known surface",
+            "occupied_merge_order": ["driveable_surface", "static_occupancy", "actors"],
+            "visibility_version": "0.3.3",
+            "surface_ray_policy": "ID 17 only before the nearest occupied surface; surface retained; space behind remains 255",
+            "open_ray_policy": "valid rays without an occupied surface generate ID 17 until occupancy-grid exit",
+            "occupied_footprint_policy": "depth-adaptive image footprint z-buffer for 0.4 m occupied voxels",
+            "mask_camera": "true for verified ID 17 and visible occupied surface voxels; never true for ID 255",
             "mask_lidar": "all false",
         },
         "failures": failures,
@@ -222,7 +233,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visibility-summary", type=Path, default=REPORT_ROOT / "occupancy_camera_visibility_summary_v0.1.json")
     parser.add_argument("--final-audit", type=Path, default=REPORT_ROOT / "step6_final_audit_v0.1.json")
     parser.add_argument("--edge-diagnosis", type=Path, default=REPORT_ROOT / "step6_visibility_edge_diagnosis_v0.1.json")
-    parser.add_argument("--output", type=Path, default=REPORT_ROOT / "step6_dataset_contract_v0.1.json")
+    parser.add_argument("--output", type=Path, default=REPORT_ROOT / "step6_dataset_contract_v0.3.json")
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
 
